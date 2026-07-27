@@ -40,6 +40,12 @@ if "model_loaded" not in st.session_state:
     st.session_state.model_loaded = False
 if "selected_series" not in st.session_state:
     st.session_state.selected_series = None
+if "compare_before" not in st.session_state:
+    st.session_state.compare_before = None
+if "compare_after" not in st.session_state:
+    st.session_state.compare_after = None
+if "compare_mode" not in st.session_state:
+    st.session_state.compare_mode = False
 
 # --- DICOM 메타데이터 ---
 def extract_dicom_metadata(ds):
@@ -340,25 +346,68 @@ with st.sidebar:
             st.markdown("---")
             studies = group_files_by_study_series(uploaded_files)
 
+            # 비교 모드 토글
+            compare_mode = st.toggle("🔀 비교 판독 모드", value=st.session_state.compare_mode)
+            if compare_mode != st.session_state.compare_mode:
+                st.session_state.compare_mode = compare_mode
+                st.session_state.compare_before = None
+                st.session_state.compare_after = None
+                st.session_state.selected_series = None
+                st.rerun()
+
             for study_uid, study in studies.items():
                 with st.expander(f"📁 {study['label']}", expanded=True):
                     for series_uid, series in study["series"].items():
-                        count   = len(series["files"])
-                        is_selected = st.session_state.selected_series == series_uid
-                        btn_label = f"{'✅' if is_selected else '📋'} {series['label']} ({count}장)"
-                        if st.button(btn_label, key=f"series_{series_uid}"):
-                            st.session_state.selected_series = series_uid
-                            st.session_state.messages = []
-                            st.rerun()
+                        count = len(series["files"])
+                        if st.session_state.compare_mode:
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                is_before = st.session_state.compare_before == series_uid
+                                if st.button(f"{'✅ 이전' if is_before else '이전 CT'}", key=f"before_{series_uid}"):
+                                    st.session_state.compare_before = series_uid
+                                    st.session_state.messages = []
+                                    st.rerun()
+                            with col2:
+                                is_after = st.session_state.compare_after == series_uid
+                                if st.button(f"{'✅ 이후' if is_after else '이후 CT'}", key=f"after_{series_uid}"):
+                                    st.session_state.compare_after = series_uid
+                                    st.session_state.messages = []
+                                    st.rerun()
+                            st.caption(f"{series['label']} ({count}장)")
+                        else:
+                            is_selected = st.session_state.selected_series == series_uid
+                            btn_label = f"{'✅' if is_selected else '📋'} {series['label']} ({count}장)"
+                            if st.button(btn_label, key=f"series_{series_uid}"):
+                                st.session_state.selected_series = series_uid
+                                st.session_state.messages = []
+                                st.rerun()
 
-            selected_series_data = None
-            for study_uid, study in studies.items():
-                for series_uid, series in study["series"].items():
-                    if series_uid == st.session_state.selected_series:
-                        selected_series_data = series
-                        break
+            # 시리즈 데이터 찾기
+            all_series = {s_uid: s for st_uid, st_data in studies.items() for s_uid, s in st_data["series"].items()}
 
-            if selected_series_data:
+            selected_series_data = all_series.get(st.session_state.selected_series)
+            before_series_data = all_series.get(st.session_state.compare_before)
+            after_series_data = all_series.get(st.session_state.compare_after)
+
+            if st.session_state.compare_mode:
+                st.markdown("---")
+                if before_series_data:
+                    st.caption(f"이전 CT: {before_series_data['label']} ({len(before_series_data['files'])}장)")
+                else:
+                    st.caption("이전 CT: 미선택")
+                if after_series_data:
+                    st.caption(f"이후 CT: {after_series_data['label']} ({len(after_series_data['files'])}장)")
+                else:
+                    st.caption("이후 CT: 미선택")
+
+                if before_series_data and after_series_data:
+                    active_files = before_series_data["files"]
+                    active_modality = before_series_data["modality"]
+                    st.session_state.compare_before_files = before_series_data["files"]
+                    st.session_state.compare_after_files = after_series_data["files"]
+                    st.session_state.compare_before_modality = before_series_data["modality"]
+
+            elif selected_series_data:
                 active_files    = selected_series_data["files"]
                 active_modality = selected_series_data["modality"]
                 st.markdown("---")
@@ -407,7 +456,51 @@ if prompt := st.chat_input("질문을 입력하세요..."):
     else:
         with st.chat_message("assistant"):
             try:
-                if active_files:
+                if st.session_state.get("compare_mode") and st.session_state.get("compare_before_files") and st.session_state.get("compare_after_files"):
+                    before_files = st.session_state.compare_before_files
+                    after_files = st.session_state.compare_after_files
+                    modality = st.session_state.compare_before_modality
+
+                    modality_map = {
+                        "CT": "CT 영상의학과",
+                        "MR": "MRI 영상의학과",
+                        "CR": "흉부 X-ray 영상의학과",
+                        "DX": "X-ray 영상의학과",
+                        "OP": "안과",
+                        "US": "초음파 영상의학과",
+                        "NM": "핵의학과",
+                        "PT": "PET 핵의학과",
+                    }
+                    specialty = modality_map.get(modality, "영상의학과")
+                    system_text = f"You are a Korean {specialty} specialist. Respond in Korean."
+
+                    body_part = ""
+                    if modality == "CT":
+                        try:
+                            before_files[0].seek(0)
+                            ds_tmp = pydicom.dcmread(before_files[0])
+                            body_part = str(getattr(ds_tmp, "BodyPartExamined", "")).strip().upper()
+                            before_files[0].seek(0)
+                        except Exception:
+                            pass
+
+                    before_sampled = uniform_sample(before_files, max_slices=42)
+                    after_sampled = uniform_sample(after_files, max_slices=43)
+
+                    compare_prompt = (
+                        f"The first 42 slices (SLICE 1-42) are pre-operative/previous CT images. "
+                        f"The next 43 slices (SLICE 43-85) are post-operative/follow-up CT images. "
+                        f"Please compare the two and describe any changes, improvements, or new findings. "
+                        f"User's question: {prompt}\nRespond in Korean."
+                    )
+
+                    with st.spinner(f"비교 판독 중... (이전 {len(before_sampled)}장 + 이후 {len(after_sampled)}장)"):
+                        response = analyze_batch(
+                            before_sampled + after_sampled, compare_prompt, system_text,
+                            modality=modality, body_part=body_part
+                        )
+
+                elif active_files:
                     modality_map = {
                         "CT": "CT 영상의학과",
                         "MR": "MRI 영상의학과",
