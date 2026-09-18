@@ -46,6 +46,8 @@ if "compare_after" not in st.session_state:
     st.session_state.compare_after = None
 if "compare_mode" not in st.session_state:
     st.session_state.compare_mode = False
+if "last_radiology_result" not in st.session_state:
+    st.session_state.last_radiology_result = None
 
 # --- DICOM 메타데이터 ---
 def extract_dicom_metadata(ds):
@@ -546,11 +548,21 @@ if prompt := st.chat_input("질문을 입력하세요..."):
 
                 else:
                     with st.spinner("응답 생성 중..."):
+                        user_content = prompt
+                        if st.session_state.last_radiology_result:
+                            user_content = (
+                                f"[이전 판독 결과]\n{st.session_state.last_radiology_result}\n\n"
+                                f"[질문]\n{prompt}"
+                            )
                         messages = [
-                            {"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant."}]},
-                            {"role": "user",   "content": [{"type": "text", "text": prompt}]}
+                            {"role": "system", "content": [{"type": "text", "text": "You are a helpful medical assistant. Respond in Korean."}]},
+                            {"role": "user",   "content": [{"type": "text", "text": user_content}]}
                         ]
                         response = run_model(messages, max_new_tokens=512)
+
+                # 이미지 판독 결과면 저장
+                if active_files or (st.session_state.get("compare_mode") and st.session_state.get("compare_before_files")):
+                    st.session_state.last_radiology_result = response
 
                 st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
